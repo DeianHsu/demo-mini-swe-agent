@@ -12,17 +12,6 @@ client = OpenAI(
     max_retries=2,
 )
 
-def use_llm(messages: list[dict]) -> str:
-    response = client.chat.completions.create(
-        model=os.getenv("DEEPSEEK_MODEL", "deepseek-flash"),
-        messages=messages,
-        extra_body={
-            "thinking": {"type": "disabled"}
-        },
-    )
-    return response.choices[0].message.content or ""
-
-
 def use_llm_with_tools(messages: list[dict]) -> dict:
     tools_schema = [
         {

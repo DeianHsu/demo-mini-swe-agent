@@ -1,16 +1,31 @@
 import json
 from textwrap import dedent
 
-from ai.testing import tool_call
+from mini_swe_agent_demo.docker_bash.use_llm import use_llm_with_tools
+from mini_swe_agent_demo.docker_bash.environment import execute, limit_observation
 
-from mini_swe_agent_demo.docker_bash.use_llm import *
-from mini_swe_agent_demo.docker_bash.environment import execute
+MAX_TOOL_HISTORY_CHARS = 256000
+OMITTED_OBSERVATION = "[更早的命令输出已省略；需要时请缩小范围重新读取。]"
+
+
+def trim_tool_history(history: list[dict]) -> None:
+    tools = [row for row in history if row.get("role") == "tool" and isinstance(row.get("content"), str)]
+    for row in tools:
+        row["content"] = limit_observation(row["content"])
+    total = sum(len(row["content"]) for row in tools)
+    for row in tools:
+        if total <= MAX_TOOL_HISTORY_CHARS:
+            break
+        if len(row["content"]) > len(OMITTED_OBSERVATION):
+            total -= len(row["content"]) - len(OMITTED_OBSERVATION)
+            row["content"] = OMITTED_OBSERVATION
 
 
 def model(task: str, history: list, workdir: str = "/workspace") -> dict:
+    trim_tool_history(history)
     messages = []
     prompt = dedent(f"""
-        你是一个文件检查 Agent。
+        你是一个编程智能体。
         执行环境是 Linux 容器中的 Bash，当前目录为 {workdir}。
         需要操作时，通过 execute 工具提交 Bash 脚本。
         每次调用启动独立进程，文件修改会保留。
@@ -32,7 +47,7 @@ def model(task: str, history: list, workdir: str = "/workspace") -> dict:
 def agent(task: str, *, container_name: str = "mini-swe-learning", workdir: str = "/workspace", timeout: int = 10,
           max_steps: int = 10, ) -> list:
     history = []
-    for i in range(max_steps):
+    for _ in range(max_steps):
         assistant_message = model(task, history, workdir=workdir)
         history.append(assistant_message)
         tool_calls = assistant_message.get("tool_calls") or []
