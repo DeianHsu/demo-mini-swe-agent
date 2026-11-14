@@ -19,16 +19,20 @@ from verifier import DATASET_REPOSITORY, DATASET_REVISION
 TASK_COUNT = 642
 BATCH_SIZE = 214
 
-# 使用原始镜像的 Git 和仓库元数据读取只读工作区，忽略智能体修改过的 .git。
+# 使用原始镜像的实际文件作为基准，包含构建时留下的未提交、未跟踪文件。
+# 只读工作区由原始镜像中的 Git 读取，不信任智能体修改过的 .git。
 CAPTURE_SCRIPT = r"""
 set -euo pipefail
 repo="$1"
 candidate="$2"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 git -c safe.directory='*' -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+    --git-dir="$repo/.git" --work-tree="$repo" add -A
+baseline=$(git -c safe.directory='*' --git-dir="$repo/.git" write-tree)
+git -c safe.directory='*' -c core.hooksPath=/dev/null -c core.fsmonitor=false \
     --git-dir="$repo/.git" --work-tree="$candidate" add -A
 git -c safe.directory='*' --git-dir="$repo/.git" --work-tree="$candidate" \
-    diff --cached --binary --no-ext-diff --no-textconv HEAD --
+    diff --cached --binary --no-ext-diff --no-textconv "$baseline" --
 """
 
 

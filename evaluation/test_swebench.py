@@ -193,7 +193,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(process.wait.call_args_list[0].kwargs, {"timeout": 3180})
         killpg.assert_called_once_with(123, 9)
 
-    def test_patch_replay_includes_committed_new_binary_and_deleted_files(self):
+    def test_patch_replay_uses_image_files_and_keeps_all_agent_changes(self):
         git = shutil.which("git")
         if git is None:
             self.skipTest("需要 Git")
@@ -220,6 +220,12 @@ class EvaluationTests(unittest.TestCase):
         (base / ".gitignore").write_bytes(b"ignored.txt\n")
         git_command(base, "add", "-A")
         git_command(base, "commit", "-m", "基础版本")
+        # 官方镜像可能带有未提交的改动和未跟踪文件，判分容器也会自带同一份内容。
+        (base / "code.txt").write_bytes(b"image build adjustment\n")
+        (base / "image-unchanged.txt").write_bytes(b"already in image\n")
+        (base / "image-removed.txt").write_bytes(b"remove this image file\n")
+        (base / "appendonlydir").mkdir()
+        (base / "appendonlydir/state.rdb").write_bytes(b"\x00original redis state\xff")
         candidate, verifier = self.root / "candidate", self.root / "verifier"
         shutil.copytree(base, candidate)
         shutil.copytree(base, verifier)
@@ -228,6 +234,8 @@ class EvaluationTests(unittest.TestCase):
         binary = b"\x00\xff\x01binary data\n"
         (candidate / "new.bin").write_bytes(binary)
         (candidate / "ignored.txt").write_bytes(b"build output\n")
+        (candidate / "image-removed.txt").unlink()
+        (candidate / "appendonlydir/state.rdb").write_bytes(b"\x00updated redis state\xfe")
         git_command(candidate, "add", "-A")
         git_command(candidate, "commit", "-m", "智能体自行提交")
         (candidate / "code.txt").write_bytes(b"final uncommitted change\n")
@@ -243,6 +251,10 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual((verifier / "new.bin").read_bytes(), binary)
         self.assertFalse((verifier / "deleted.txt").exists())
         self.assertFalse((verifier / "ignored.txt").exists())
+        self.assertFalse((verifier / "image-removed.txt").exists())
+        self.assertEqual((verifier / "appendonlydir/state.rdb").read_bytes(), b"\x00updated redis state\xfe")
+        self.assertEqual((verifier / "image-unchanged.txt").read_bytes(), b"already in image\n")
+        self.assertNotIn(b"image-unchanged.txt", captured.stdout)
 
     def test_setup_failure_spends_no_model_tokens(self):
         self.setup_failure = True
