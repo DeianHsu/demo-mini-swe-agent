@@ -1,4 +1,4 @@
-name: SWE-bench 单题执行
+name: SWE-bench Pro V2 单题执行
 
 on:
   workflow_call:
