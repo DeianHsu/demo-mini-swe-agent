@@ -10,6 +10,7 @@
 - 工具结果通过关联 `tool_call_id` 的 `tool` 消息反馈给模型。
 - 模型停止工具调用后结束，默认最多调用模型 250 轮，单条命令执行上限 60 秒。
 - 由 `budget.py` 监管每题 50 分钟时限，费用阈值为 3 美元；`cost.py` 负责词元和费用统计。
+- 默认关闭思考；预算入口可用 `--thinking-mode max` 启用最高档，模式随轨迹和结果保存。
 - 单次命令输出最多 16,000 字符，工具历史正文累计最多 256,000 字符；截断时保留调用对应关系。
 
 ## 项目结构
@@ -83,7 +84,10 @@ uv run python -m unittest discover -s evaluation -v
 
 - **SWE-bench Pro V2 小规模判分校准**：填写官方 `v2/tasks/` 下的单题目录名 `instance_id`，分别验证空补丁失败、参考补丁通过。不需要模型密钥，产物名为 `swebench-calibration`。
 - **SWE-bench Pro V2 全量评测**：每轮固定 642 题，每题解题一次，在新容器中判分。需配置仓库机密 `DEEPSEEK_API_KEY`，最终报告产物名为 `swebench-report`。
+- **SWE-bench Pro V2 全量评测（最高思考）**：独立手动入口 `evaluate_all_max.yml`，固定启用 `thinking.type=enabled` 和 `reasoning_effort=max`，使用相同密钥、模型、题目、预算及 120 秒客户端超时。最终报告产物名为 `swebench-report-max`。
 
-校准入口为 `evaluation/calibrate.py`，全量入口为 `evaluation/swebench.py`。两者只共用评测层的 `verifier.py`，校准结果不计入全量成绩。报告包含每题用时、词元消耗、费用、轮数、是否做对以及总成本；统计不完整时不会发布最终通过率或完整总费用。
+校准入口为 `evaluation/calibrate.py`，全量入口为 `evaluation/swebench.py`。两者只共用评测层的 `verifier.py`，校准结果不计入全量成绩。报告包含思考模式、每题用时、词元消耗、费用、轮数、是否做对以及总成本；统计不完整时不会发布最终通过率或完整总费用。
+
+最高思考入口复用全量调度，每轮单独生成清单和产物；普通全量入口始终默认关闭思考。带工具调用的思考回复会完整保留并回传 `reasoning_content`，费用仍按服务端 `usage` 中的总输出词元计算，不重复加算思考词元。
 
 本地 `archive/`、`.env`、虚拟环境和编辑器配置均不纳入版本控制。

@@ -2,6 +2,7 @@
 
 import ast
 from decimal import Decimal
+import csv
 import json
 from pathlib import Path
 import shutil
@@ -77,10 +78,10 @@ class EvaluationTests(unittest.TestCase):
             returncode = 0 if self.reward == "1" else 1
         return subprocess.CompletedProcess(args, returncode, stdout)
 
-    def agent(self, task_file, container, workdir, output, log_path):
+    def agent(self, task_file, container, workdir, output, log_path, *, thinking_mode):
         output.mkdir()
-        verifier.save_json(output / "agent_result.json", self.metrics)
-        verifier.save_json(output / "case.json", self.manifest["budget"])
+        verifier.save_json(output / "agent_result.json", {**self.metrics, "thinking_mode": thinking_mode})
+        verifier.save_json(output / "case.json", {**self.manifest["budget"], "thinking_mode": thinking_mode})
         return 1 if self.metrics["exit_reason"] == "error" else 0
 
     def evaluate(self):
@@ -92,6 +93,33 @@ class EvaluationTests(unittest.TestCase):
     def test_full_manifest_rejects_missing_tasks(self):
         with self.assertRaisesRegex(ValueError, "642"):
             swebench.make_manifest(self.dataset, "run", "commit")
+
+    def test_max_mode_keeps_budget_and_reaches_agent_and_reports(self):
+        with patch.object(swebench, "TASK_COUNT", 1):
+            thinking_manifest = swebench.make_manifest(self.dataset, "run-1", "commit-1", thinking_mode="max")
+        self.assertEqual(self.manifest["thinking_mode"], "disabled")
+        self.assertEqual(thinking_manifest["budget"], self.manifest["budget"])
+        self.assertEqual(thinking_manifest["instances"], self.manifest["instances"])
+        self.manifest = thinking_manifest
+        result, agent = self.evaluate()
+        self.assertEqual(agent.call_args.kwargs["thinking_mode"], "max")
+        self.assertEqual(result["thinking_mode"], "max")
+        self.assertIs(result["resolved"], True)
+        summary = report.write_report(self.output, manifest=self.manifest)
+        self.assertEqual(summary["thinking_mode"], "max")
+        self.assertIn("最高（max）", (self.output / "report.md").read_text(encoding="utf-8"))
+        with (self.output / "report.csv").open(encoding="utf-8-sig", newline="") as handle:
+            self.assertEqual(next(csv.DictReader(handle))["thinking_mode"], "max")
+
+    def test_max_mode_is_forwarded_to_the_budget_command(self):
+        process = MagicMock(returncode=0)
+        process.wait.return_value = 0
+        with patch.object(swebench.subprocess, "Popen", return_value=process) as popen:
+            swebench.run_agent(self.root / "instruction.md", "container", "/app", self.output,
+                              self.root / "budget.log", thinking_mode="max")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--thinking-mode") + 1], "max")
+        self.assertIn("swe.budget", command)
 
     def test_three_batches_cover_exactly_the_full_set(self):
         indices = [i for batch in range(3) for i in range(
@@ -231,9 +259,11 @@ class EvaluationTests(unittest.TestCase):
         agent.assert_not_called()
 
     def test_budget_mismatch_is_not_published_as_a_valid_score(self):
-        def wrong_budget(*args):
-            result = self.agent(*args)
-            verifier.save_json(args[3] / "case.json", {**self.manifest["budget"], "max_steps": 999})
+        def wrong_budget(*args, **kwargs):
+            result = self.agent(*args, **kwargs)
+            verifier.save_json(args[3] / "case.json", {
+                **self.manifest["budget"], "max_steps": 999, "thinking_mode": kwargs["thinking_mode"],
+            })
             return result
         with patch.object(verifier, "run_command", side_effect=self.command), \
              patch.object(swebench, "run_agent", side_effect=wrong_budget):
@@ -241,9 +271,26 @@ class EvaluationTests(unittest.TestCase):
         self.assertIsNone(result["resolved"])
         self.assertEqual(result["status"], "error")
 
+    def test_thinking_mode_mismatch_blocks_grading(self):
+        self.manifest["thinking_mode"] = "max"
+
+        def wrong_mode(*args, **kwargs):
+            result = self.agent(*args, **kwargs)
+            verifier.save_json(args[3] / "case.json", {**self.manifest["budget"], "thinking_mode": "disabled"})
+            return result
+
+        with patch.object(verifier, "run_command", side_effect=self.command), \
+             patch.object(swebench, "run_agent", side_effect=wrong_mode):
+            result = swebench.run_case(self.dataset, self.manifest, 0, self.output)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("思考模式", result["error"])
+        self.assertIsNone(result["resolved"])
+        self.assertEqual(result["known_cost_usd"], self.metrics["known_cost_usd"])
+        self.assertFalse(any("bridge" in args for args in self.commands))
+
     def test_missing_budget_record_preserves_cost_but_blocks_grading(self):
-        def missing_budget(*args):
-            result = self.agent(*args)
+        def missing_budget(*args, **kwargs):
+            result = self.agent(*args, **kwargs)
             (args[3] / "case.json").unlink()
             return result
 
@@ -286,6 +333,13 @@ class EvaluationTests(unittest.TestCase):
         self.evaluate()
         with self.assertRaises(ValueError):
             report.write_report(self.output, manifest={**self.manifest, "run_id": "another-run"})
+
+    def test_older_manifest_is_not_labeled_with_an_inferred_mode(self):
+        self.evaluate()
+        old_manifest = {key: value for key, value in self.manifest.items() if key != "thinking_mode"}
+        summary = report.write_report(self.output, manifest=old_manifest)
+        self.assertIsNone(summary["thinking_mode"])
+        self.assertIn("思考模式 | 未记录", (self.output / "report.md").read_text(encoding="utf-8"))
 
     def test_evaluation_does_not_import_main_project(self):
         for module in (swebench, report, verifier):

@@ -32,7 +32,8 @@ git -c safe.directory='*' --git-dir="$repo/.git" --work-tree="$candidate" \
 """
 
 
-def make_manifest(dataset: Path, run_id: str, code_revision: str) -> dict:
+def make_manifest(dataset: Path, run_id: str, code_revision: str, *,
+                  thinking_mode: str = "disabled") -> dict:
     task_files = sorted((dataset / "v2/tasks").glob("*/task.toml"))
     if len(task_files) != TASK_COUNT:
         raise ValueError(f"全量评测需要 {TASK_COUNT} 题，实际找到 {len(task_files)} 题")
@@ -53,6 +54,7 @@ def make_manifest(dataset: Path, run_id: str, code_revision: str) -> dict:
         "code_revision": code_revision,
         "dataset_repository": DATASET_REPOSITORY,
         "dataset_revision": DATASET_REVISION,
+        "thinking_mode": thinking_mode,
         "instances": instances,
         "budget": {
             "max_steps": 250,
@@ -67,13 +69,13 @@ def make_manifest(dataset: Path, run_id: str, code_revision: str) -> dict:
 
 
 def run_agent(task_file: Path, container: str, workdir: str, output: Path,
-              log_path: Path) -> int:
+              log_path: Path, *, thinking_mode: str = "disabled") -> int:
     # 独立进程组用于在主线监管进程异常卡住时一并终止其子进程。
     with log_path.open("wb") as log:
         process = subprocess.Popen(
             [sys.executable, "-B", "-u", "-m", "swe.budget",
              "--task-file", str(task_file), "--container", container,
-             "--workdir", workdir, "--output", str(output)],
+             "--workdir", workdir, "--output", str(output), "--thinking-mode", thinking_mode],
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
         try:
@@ -103,6 +105,7 @@ def run_case(dataset: Path, manifest: dict, index: int, output: Path) -> dict:
     result = {
         "instance_id": instance_id,
         "run_id": manifest["run_id"],
+        "thinking_mode": manifest["thinking_mode"],
         "status": "running",
         "stage": "setup",
         "resolved": None,
@@ -151,7 +154,8 @@ def run_case(dataset: Path, manifest: dict, index: int, output: Path) -> dict:
         verifier.save_json(result_path, result)
         agent_output = case_dir / "agent"
         result["agent_returncode"] = run_agent(task_file, agent_name, workdir, agent_output,
-                                               case_dir / "budget.log")
+                                               case_dir / "budget.log",
+                                               thinking_mode=manifest["thinking_mode"])
         metrics_path = agent_output / "agent_result.json"
         if metrics_path.is_file():
             result.update(json.loads(metrics_path.read_text(encoding="utf-8")))
@@ -161,6 +165,9 @@ def run_case(dataset: Path, manifest: dict, index: int, output: Path) -> dict:
         result["budget"] = {key: settings[key] for key in manifest["budget"]}
         if result["budget"] != manifest["budget"]:
             raise ValueError("主线实际预算与本轮预定预算不一致")
+        # 模式与预算一样必须来自本轮清单，避免把关闭思考的结果混入最高档评测。
+        if settings["thinking_mode"] != manifest["thinking_mode"]:
+            raise ValueError("主线实际思考模式与本轮预定模式不一致")
 
         result["stage"] = "capture"
         verifier.save_json(result_path, result)
@@ -214,6 +221,7 @@ def main() -> None:
     plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--run-id", required=True)
     plan.add_argument("--code-revision", required=True)
+    plan.add_argument("--thinking-mode", choices=("disabled", "max"), default="disabled")
     run = commands.add_parser("run")
     run.add_argument("--dataset", type=Path, required=True)
     run.add_argument("--manifest", type=Path, required=True)
@@ -224,7 +232,8 @@ def main() -> None:
     if args.command == "revision":
         print(f"revision={DATASET_REVISION}")
     elif args.command == "plan":
-        manifest = make_manifest(args.dataset, args.run_id, args.code_revision)
+        manifest = make_manifest(args.dataset, args.run_id, args.code_revision,
+                                 thinking_mode=args.thinking_mode)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         verifier.save_json(args.output, manifest)
         for batch in range(3):

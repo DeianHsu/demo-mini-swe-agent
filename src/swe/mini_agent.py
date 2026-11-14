@@ -35,7 +35,8 @@ def trim_tool_history(history: list[dict]) -> None:
 
 
 # 为一轮模型请求组装系统提示、任务和历史消息，并返回回复及其元数据。
-def model(task: str, history: list, workdir: str = "/workspace") -> tuple[dict, dict]:
+def model(task: str, history: list, workdir: str = "/workspace", *,
+          thinking_mode: str = "disabled") -> tuple[dict, dict]:
     # 请求前先压缩工具历史，控制传给模型的上下文规模。
     trim_tool_history(history)
     # 系统提示约定工作目录、工具使用方式以及普通文本结束回复。
@@ -58,7 +59,7 @@ def model(task: str, history: list, workdir: str = "/workspace") -> tuple[dict, 
     })
     messages.extend(history)
     # 调用模型适配层，将本轮结果交回智能体循环处理。
-    response = use_llm_with_tools(messages)
+    response = use_llm_with_tools(messages, thinking_mode=thinking_mode)
     return response
 
 # 将运行事件按一行一条 JSON 的格式追加到轨迹文件，供后续恢复用量和排查问题。
@@ -78,7 +79,7 @@ def record_event(path: Path | None, kind: str, data: dict) -> None:
 def agent(task: str, *, container_name: str = "mini-swe-learning",
           workdir: str = "/workspace", timeout: int = 60,
           max_steps: int = 250, cost_limit: float = 3.0,
-          trajectory_path: Path | None = None) -> dict:
+          trajectory_path: Path | None = None, thinking_mode: str = "disabled") -> dict:
     # 拒绝无效预算，避免开始执行后才发现轮数或时限不可用。
     if max_steps < 1 or timeout <= 0 or cost_limit <= 0:
         raise ValueError("轮数、命令时限和费用阈值必须大于零")
@@ -99,6 +100,7 @@ def agent(task: str, *, container_name: str = "mini-swe-learning",
         "max_steps": max_steps,
         "command_timeout": timeout,
         "cost_limit_usd": str(limit),
+        "thinking_mode": thinking_mode,
         "token_prices_per_million": {
             key: str(value) for key, value in TOKEN_PRICES.items()
         },
@@ -117,7 +119,7 @@ def agent(task: str, *, container_name: str = "mini-swe-learning",
             cost_known = False
             record_event(trajectory_path, "request", {"step": steps})
             # 请求模型并把回复加入历史，供下一轮理解此前的操作。
-            message, metadata = model(task, history, workdir=workdir)
+            message, metadata = model(task, history, workdir=workdir, thinking_mode=thinking_mode)
             history.append(message)
 
             # 工具执行前先保存回复与用量，后续命令失败时仍可恢复这一轮的消耗。
@@ -196,6 +198,7 @@ def agent(task: str, *, container_name: str = "mini-swe-learning",
         summary = {
             "exit_reason": exit_reason,
             "model_calls": steps,
+            "thinking_mode": thinking_mode,
             "budget_cost_usd": str(total_cost) if cost_known else None,
         }
         record_event(trajectory_path, "end", summary)

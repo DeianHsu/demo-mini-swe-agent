@@ -2,6 +2,14 @@ name: SWE-bench Pro V2 全量评测
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      thinking_mode:
+        type: string
+        default: disabled
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: true
 
 permissions:
   contents: read
@@ -48,12 +56,15 @@ jobs:
 
       - name: 固定本轮 642 题清单
         id: plan
+        env:
+          THINKING_MODE: ${{ inputs.thinking_mode || 'disabled' }}
         run: |
           python3 evaluation/swebench.py plan \
             --dataset archive/swebench-dataset \
             --output archive/swebench-run/manifest.json \
             --run-id "$GITHUB_RUN_ID" \
-            --code-revision "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            --code-revision "$GITHUB_SHA" \
+            --thinking-mode "$THINKING_MODE" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -143,7 +154,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
-          name: swebench-report
+          name: ${{ inputs.thinking_mode == 'max' && 'swebench-report-max' || 'swebench-report' }}
           path: |
             archive/swebench-run/manifest.json
             archive/swebench-run/report.json

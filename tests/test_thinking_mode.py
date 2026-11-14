@@ -1,0 +1,151 @@
+"""离线验证思考模式的请求、工具历史回传和预算进程传参，不访问真实模型。"""
+
+from decimal import Decimal
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+import httpx2
+from openai import OpenAI
+
+with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "offline-test-key", "DEEPSEEK_BASE_URL": "https://example.invalid"}), \
+     patch("dotenv.load_dotenv"):
+    from swe import budget, cost, mini_agent, use_llm
+
+
+class ThinkingModeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="swe-thinking-offline-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.requests = []
+        self.responses = []
+        self.usage = {
+            "prompt_tokens": 100, "completion_tokens": 100, "total_tokens": 200,
+            "prompt_cache_hit_tokens": 20, "prompt_cache_miss_tokens": 80,
+            "completion_tokens_details": {"reasoning_tokens": 60},
+        }
+        # 保留真实 SDK 的请求序列化和响应解析，只将 HTTP 传输替换为内存响应。
+        client = OpenAI(
+            api_key="offline-test-key", base_url="https://example.invalid", timeout=120.0, max_retries=0,
+            http_client=httpx2.Client(transport=httpx2.MockTransport(self.respond)),
+        )
+        self.addCleanup(client.close)
+        client_patch = patch.object(use_llm, "client", client)
+        client_patch.start()
+        self.addCleanup(client_patch.stop)
+        model_patch = patch.dict(os.environ, {"DEEPSEEK_MODEL": "deepseek-flash"})
+        model_patch.start()
+        self.addCleanup(model_patch.stop)
+
+    def respond(self, request):
+        self.requests.append(json.loads(request.content))
+        self.assertEqual(request.extensions["timeout"]["read"], 120.0)
+        return httpx2.Response(200, json=self.responses.pop(0))
+
+    def response(self, message, finish_reason="stop"):
+        return {
+            "id": "offline-response", "object": "chat.completion", "created": 0, "model": "deepseek-flash",
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": self.usage,
+        }
+
+    def test_default_request_still_explicitly_disables_thinking(self):
+        self.responses.append(self.response({"role": "assistant", "content": "finish"}))
+        _, metadata = use_llm.use_llm_with_tools([{"role": "user", "content": "offline check"}])
+        self.assertEqual(self.requests[0]["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", self.requests[0])
+        self.assertEqual(metadata["thinking_mode"], "disabled")
+
+    def test_max_thinking_survives_tool_round_trip_and_counts_output_once(self):
+        reasoning = "mock reasoning " * 20000
+        self.responses.extend([
+            self.response({
+                "role": "assistant", "content": "", "reasoning_content": reasoning,
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {
+                    "name": "execute", "arguments": '{"command":"pwd"}',
+                }}],
+            }, "tool_calls"),
+            self.response({"role": "assistant", "content": "finish", "reasoning_content": "done"}),
+        ])
+        trajectory = self.root / "trajectory.jsonl"
+        with patch.object(mini_agent, "execute", return_value="/app") as execute:
+            result = mini_agent.agent("offline check", thinking_mode="max", trajectory_path=trajectory)
+        execute.assert_called_once()
+        self.assertEqual(result["thinking_mode"], "max")
+        self.assertEqual(result["model_calls"], 2)
+        for request in self.requests:
+            self.assertEqual(request["thinking"], {"type": "enabled"})
+            self.assertEqual(request["reasoning_effort"], "max")
+        previous = next(message for message in self.requests[1]["messages"] if message["role"] == "assistant")
+        self.assertEqual(previous["reasoning_content"], reasoning)
+        events = [json.loads(line) for line in trajectory.read_text(encoding="utf-8").splitlines()]
+        for event in events:
+            if event["kind"] in ("start", "assistant", "end"):
+                self.assertEqual(event["data"]["thinking_mode"], "max")
+        usage = cost.read_usage(trajectory)
+        self.assertTrue(usage["usage_complete"])
+        self.assertEqual(usage["completion_tokens"], 200)
+        self.assertEqual(usage["total_tokens"], 400)
+        self.assertEqual(Decimal(usage["known_cost_usd"]), Decimal("0.00028824"))
+
+    def test_unsupported_mode_fails_before_sending_a_request(self):
+        with self.assertRaisesRegex(ValueError, "thinking_mode"):
+            use_llm.use_llm_with_tools([], thinking_mode="high")
+        self.assertEqual(self.requests, [])
+
+    def test_supervisor_worker_uses_the_mode_saved_in_case_json(self):
+        self.responses.append(self.response({"role": "assistant", "content": "finish", "reasoning_content": "done"}))
+        process = MagicMock(returncode=0)
+        process.wait.return_value = 0
+        process.poll.return_value = 0
+
+        def start_worker(command, **kwargs):
+            budget.run_worker(Path(command[-1]))
+            return process
+
+        output = self.root / "case"
+        with patch.object(budget.subprocess, "Popen", side_effect=start_worker), \
+             patch.object(budget.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            result = budget.run_case("offline check", "unused", "/app", output, thinking_mode="max")
+        self.assertEqual(self.requests[0]["reasoning_effort"], "max")
+        self.assertEqual(result["thinking_mode"], "max")
+        self.assertTrue(result["usage_complete"])
+        settings = json.loads((output / "case.json").read_text(encoding="utf-8"))
+        self.assertEqual(settings["thinking_mode"], "max")
+        self.assertEqual((settings["max_steps"], settings["command_timeout"], settings["cost_limit_usd"],
+                          settings["task_timeout_seconds"]), (250, 60, "3", 3000))
+
+    def test_timeout_preserves_mode_without_inventing_model_usage(self):
+        process = MagicMock(returncode=-9)
+        process.wait.side_effect = [subprocess.TimeoutExpired("worker", 3000), -9]
+        process.poll.return_value = None
+        with patch.object(budget.subprocess, "Popen", return_value=process), \
+             patch.object(budget.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            result = budget.run_case("offline check", "unused", "/app", self.root / "timeout", thinking_mode="max")
+        process.kill.assert_called_once()
+        self.assertEqual(result["exit_reason"], "time_limit")
+        self.assertEqual(result["thinking_mode"], "max")
+        self.assertIsNone(result["budget_cost_usd"])
+        self.assertEqual(self.requests, [])
+
+    def test_budget_cli_defaults_to_disabled_and_accepts_max(self):
+        task = self.root / "task.txt"
+        task.write_text("offline check", encoding="utf-8")
+        for mode in ("disabled", "max"):
+            arguments = ["budget", "--task-file", str(task), "--container", "unused", "--output", str(self.root / mode)]
+            if mode == "max":
+                arguments.extend(["--thinking-mode", "max"])
+            with self.subTest(mode=mode), patch.object(budget.sys, "argv", arguments), \
+                 patch.object(budget, "run_case", return_value={"exit_reason": "finished"}) as run_case, \
+                 patch("builtins.print"):
+                budget.main()
+            self.assertEqual(run_case.call_args.kwargs["thinking_mode"], mode)
+
+
+if __name__ == "__main__":
+    unittest.main()

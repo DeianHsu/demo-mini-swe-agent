@@ -17,13 +17,21 @@ client = OpenAI(
 )
 
 # 向模型发送对话与工具定义，分别返回回复消息和包含用量的响应元数据。
-def use_llm_with_tools(messages: list[dict]) -> tuple[dict, dict]:
+def use_llm_with_tools(messages: list[dict], *, thinking_mode: str = "disabled") -> tuple[dict, dict]:
     # 当前价目只覆盖 deepseek-flash，防止换用其他模型后仍按旧价计费。
     model_name = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
     if model_name != "deepseek-flash":
         raise ValueError(
             "当前预算价目只适用于 deepseek-flash；更换模型前须更新价目"
         )
+
+    # 默认关闭思考；最高档同时启用思考并显式指定 max，避免落到服务端默认的 high。
+    # DeepSeek 扩展参数经 extra_body 原样传入，不依赖 SDK 对思考档位的类型枚举。
+    extra_body = {"thinking": {"type": "disabled"}}
+    if thinking_mode == "max":
+        extra_body = {"thinking": {"type": "enabled"}, "reasoning_effort": "max"}
+    elif thinking_mode != "disabled":
+        raise ValueError("thinking_mode 只能为 disabled 或 max")
 
     # 声明 execute 工具及其必需的 command 参数，让模型按约定提交 Bash 脚本。
     tools_schema = [
@@ -46,23 +54,22 @@ def use_llm_with_tools(messages: list[dict]) -> tuple[dict, dict]:
         }
     ]
 
-    # 将本轮消息和工具定义发送给模型，并明确关闭额外的思考模式。
+    # 两种模式使用相同的模型、工具和客户端超时，只切换明确记录的思考参数。
     response = client.chat.completions.create(
         tools=tools_schema,
         model=model_name,
         messages=messages,
-        extra_body={
-            "thinking": {"type": "disabled"}
-        },
+        extra_body=extra_body,
     )
 
     # 对话消息供后续轮次使用，响应标识、停止原因和用量供轨迹与成本统计使用。
-    # 保留缺失的 usage 为 None，让调用方明确识别无法核算的响应。
+    # 完整保留 reasoning_content，供后续工具调用回传；缺失的 usage 保留为 None。
     choice = response.choices[0]
     return choice.message.to_dict(), {
         "response_id": response.id,
         "model": response.model,
         "created": response.created,
         "finish_reason": choice.finish_reason,
+        "thinking_mode": thinking_mode,
         "usage": response.usage.to_dict() if response.usage is not None else None,
     }

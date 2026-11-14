@@ -1,0 +1,16 @@
+name: SWE-bench Pro V2 全量评测（最高思考）
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    # 独立手动入口复用同一套调度和预算，只把思考模式固定为最高档。
+    uses: ./.github/workflows/evaluate_all.yml
+    with:
+      thinking_mode: max
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

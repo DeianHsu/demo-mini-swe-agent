@@ -17,6 +17,8 @@ def write_report(run_dir: Path, verdicts: dict[str, bool | None] | None = None,
     if not instance_ids:
         raise ValueError("运行目录中没有题目记录")
 
+    # 新运行记录模式；既有清单未记录时明确显示未知，不替历史结果推定模式。
+    thinking_mode = manifest.get("thinking_mode") if manifest is not None else None
     cases = []
     for instance_id in instance_ids:
         result_path = run_dir / instance_id / "agent_result.json"
@@ -31,6 +33,7 @@ def write_report(run_dir: Path, verdicts: dict[str, bool | None] | None = None,
                 "seconds": None, "model_calls": None,
                 "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
                 "known_cost_usd": "0", "budget_cost_usd": None, "usage_complete": False,
+                "thinking_mode": thinking_mode,
             }
         # 缺少判分表示尚未得到结果，不能当作答错。
         resolved = verdicts.get(instance_id) if verdicts is not None else result["resolved"]
@@ -51,6 +54,7 @@ def write_report(run_dir: Path, verdicts: dict[str, bool | None] | None = None,
     ungraded = len(cases) - passed - failed
     report = {
         "manifest": manifest,
+        "thinking_mode": thinking_mode,
         "cases": cases,
         "task_count": len(cases),
         "passed": passed,
@@ -68,7 +72,7 @@ def write_report(run_dir: Path, verdicts: dict[str, bool | None] | None = None,
         json.dumps(report, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    fields = ["instance_id", "seconds", "prompt_tokens", "completion_tokens", "total_tokens",
+    fields = ["instance_id", "thinking_mode", "seconds", "prompt_tokens", "completion_tokens", "total_tokens",
               "budget_cost_usd", "known_cost_usd", "model_calls", "resolved", "usage_complete",
               "status", "exit_reason", "stage", "error"]
     with (run_dir / "report.csv").open("w", encoding="utf-8-sig", newline="") as handle:
@@ -77,9 +81,11 @@ def write_report(run_dir: Path, verdicts: dict[str, bool | None] | None = None,
         writer.writerows(cases)
     rate = f'{report["pass_at_1"]:.2%}' if report["evaluation_complete"] else "未完成，暂不发布最终通过率"
     cost = f'${known_total}' if complete else f'未知；已记录 ${known_total}'
+    thinking_label = {None: "未记录", "disabled": "关闭", "max": "最高（max）"}[thinking_mode]
     (run_dir / "report.md").write_text(
         "# SWE-bench Pro V2 评测报告\n\n"
         f"| 项目 | 结果 |\n|---|---|\n| 计划题数 | {len(cases)} |\n"
+        f"| 思考模式 | {thinking_label} |\n"
         f"| 通过 / 未通过 / 未判分 | {passed} / {failed} / {ungraded} |\n"
         f"| pass@1 | {rate} |\n| 总估算成本（美元） | {cost} |\n"
         f'| 已记录词元数 | {report["known_total_tokens"]} |\n\n'

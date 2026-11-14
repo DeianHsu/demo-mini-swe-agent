@@ -41,6 +41,7 @@ def run_worker(output: Path) -> None:
         max_steps=case["max_steps"],
         cost_limit=float(case["cost_limit_usd"]),
         trajectory_path=output / "trajectory.jsonl",
+        thinking_mode=case["thinking_mode"],
     )
     # 对话已经逐条保存在轨迹中，结果文件只保留摘要，避免重复写入大段历史。
     result.pop("history")
@@ -49,7 +50,8 @@ def run_worker(output: Path) -> None:
 
 # 启动并监管一次独立解题过程，结束后停止本题容器并汇总运行统计。
 # 正常结束、超时和工作进程失败均使用同一份轨迹恢复已知用量。
-def run_case(task: str, container: str, workdir: str, output: Path) -> dict:
+def run_case(task: str, container: str, workdir: str, output: Path, *,
+             thinking_mode: str = "disabled") -> dict:
     # 每次使用独立目录，禁止覆盖已经开始过的尝试。
     output.mkdir(parents=True, exist_ok=False)
     # 固定本次任务的输入和预算，供工作进程读取并留作后续检查。
@@ -61,6 +63,7 @@ def run_case(task: str, container: str, workdir: str, output: Path) -> dict:
         "command_timeout": 60,
         "cost_limit_usd": "3",
         "task_timeout_seconds": TASK_SECONDS,
+        "thinking_mode": thinking_mode,
     })
 
     # 初始化结束状态，并用单调时钟计时，避免系统时间调整影响时限。
@@ -125,6 +128,8 @@ def run_case(task: str, container: str, workdir: str, output: Path) -> dict:
     # 最后补充解题耗时及容器清理状态，写出供调用方读取的结果。
     result.update(read_usage(output / "trajectory.jsonl"))
     result["seconds"] = seconds
+    # 即使工作进程超时或失败，结果也保留本次实际采用的思考模式。
+    result["thinking_mode"] = thinking_mode
     result["cleanup_error"] = cleanup_error
     write_json(result_path, result)
 
@@ -143,6 +148,7 @@ def main() -> None:
     parser.add_argument("--container")
     parser.add_argument("--workdir", default="/app")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--thinking-mode", choices=("disabled", "max"), default="disabled")
     args = parser.parse_args()
 
     # 内部工作进程直接读取已有目录开始解题，避免再次启动一层监管进程。
@@ -160,6 +166,7 @@ def main() -> None:
         args.container,
         args.workdir,
         args.output.resolve(),
+        thinking_mode=args.thinking_mode,
     )
     # 将统计打印为 JSON，便于终端查看或由外部调度程序接收。
     print(json.dumps(result, ensure_ascii=False))
