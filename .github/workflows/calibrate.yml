@@ -1,0 +1,81 @@
+name: SWE-bench Pro V2 小规模判分校准
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: 官方 v2/tasks 下的单题目录名（依次校准空补丁和参考补丁）
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 读取固定版本和指定题目
+        id: task
+        env:
+          INSTANCE_ID: ${{ inputs.instance_id }}
+        run: |
+          if [[ ! "$INSTANCE_ID" =~ ^instance_[A-Za-z0-9_.-]+$ ]]; then
+            echo 'instance_id 必须是官方单题目录名。' >&2
+            exit 1
+          fi
+          revision="$(python3 -B evaluation/calibrate.py --revision)"
+          printf 'revision=%s\npath=v2/tasks/%s\n' "$revision" "$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: 获取本题官方测试和参考补丁
+        uses: actions/checkout@v7
+        with:
+          repository: scaleapi/SWE-bench_Pro-os
+          ref: ${{ steps.task.outputs.revision }}
+          path: archive/swebench-calibration-dataset
+          sparse-checkout: ${{ steps.task.outputs.path }}
+          persist-credentials: false
+
+      - name: 为官方镜像释放空间
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: 在独立容器中校准空补丁和参考补丁
+        env:
+          INSTANCE_ID: ${{ inputs.instance_id }}
+        run: |
+          python3 -B evaluation/calibrate.py \
+            --dataset archive/swebench-calibration-dataset \
+            --instance-id "$INSTANCE_ID" \
+            --output archive/swebench-calibration
+
+      - name: 修正校准产物所有者
+        if: ${{ always() }}
+        run: |
+          if [ -d archive/swebench-calibration ]; then
+            sudo chown -R "$(id -u):$(id -g)" archive/swebench-calibration
+          fi
+
+      - name: 显示校准摘要
+        if: ${{ always() }}
+        run: |
+          for report in archive/swebench-calibration/*/calibration.md; do
+            if [ -f "$report" ]; then
+              cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: 保存独立校准报告和日志
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: swebench-calibration
+          path: archive/swebench-calibration/
+          if-no-files-found: warn
+          retention-days: 30

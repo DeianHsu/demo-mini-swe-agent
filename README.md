@@ -8,7 +8,8 @@
 
 - 单一工具 `execute`：解析 `tool_calls` 中的 `command`，交给容器中的 `bash -c` 执行。
 - 工具结果通过关联 `tool_call_id` 的 `tool` 消息反馈给模型。
-- 模型停止工具调用后结束，默认最多调用模型 10 轮，单条命令等待 10 秒。
+- 模型停止工具调用后结束，默认最多调用模型 250 轮，单条命令执行上限 60 秒。
+- 由 `budget.py` 监管每题 50 分钟时限，费用阈值为 3 美元；`cost.py` 负责词元和费用统计。
 - 单次命令输出最多 16,000 字符，工具历史正文累计最多 256,000 字符；截断时保留调用对应关系。
 
 ## 项目结构
@@ -20,7 +21,9 @@ src/mini_swe_agent_demo/
     ├── __init__.py
     ├── mini_agent.py        # 消息历史、工具调度与智能体循环
     ├── environment.py       # Docker Bash 命令执行与输出截断
-    └── use_llm.py           # 模型请求与原生函数调用定义
+    ├── use_llm.py           # 模型请求与原生函数调用定义
+    ├── budget.py            # 预算监管与运行结果保存
+    └── cost.py              # 词元与费用统计
 ```
 
 `model()` 组织提示与消息历史，`agent()` 控制循环并调度工具，`execute()` 执行命令并返回退出码、标准输出和标准错误。每次命令启动独立进程，容器内文件修改会保留，跨次调用的 `cd` 和环境变量设置不会保留。
@@ -39,8 +42,8 @@ uv sync
 
 ```dotenv
 DEEPSEEK_API_KEY=你的密钥
-DEEPSEEK_BASE_URL=模型接口地址
-DEEPSEEK_MODEL=模型名称
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-flash
 ```
 
 模型接口通过 OpenAI Python 软件开发工具包（SDK）调用。当前请求使用 DeepSeek 的 `thinking` 参数，服务需要支持 `tools`。`.env` 已加入 Git 忽略规则。
@@ -62,18 +65,26 @@ docker exec -w /workspace mini-swe-learning bash -c 'echo Hello Agent! > hello.t
 uv run python -m mini_swe_agent_demo.docker_bash.mini_agent
 ```
 
-默认任务列出工作目录并读取 `hello.txt`。任务位于 `docker_bash/mini_agent.py` 的 `if __name__ == "__main__":` 中，可改为修复容器内项目并运行测试。容器名、工作目录、命令等待时间和模型轮数可通过 `agent()` 参数调整。
+默认任务列出工作目录并读取 `hello.txt`。任务位于 `docker_bash/mini_agent.py` 的 `if __name__ == "__main__":` 中；演示通过 `budget.run_case()` 执行，预算在 `budget.py` 中设置。轨迹与统计写入本地 `archive/demo/`，结束后停止本题容器。
 
 已有容器停止后可通过 `docker start mini-swe-learning` 再次启动。
 
 ## 测试
 
-离线测试使用模拟的模型和 Docker 执行结果，覆盖工具调用与结果回填、输出限制、历史限额及容器工具路径：
+保留的离线测试覆盖命令输出限制、镜像工具路径，以及评测预算校验、补丁回放、校准和报告汇总；不调用模型或启动真实评测容器：
 
 ```powershell
 uv run python -m unittest discover -s tests -v
+uv run python -m unittest discover -s evaluation -v
 ```
 
-## 评测结果
+## 独立评测
 
-SWE-bench Pro V2 共 642 题，累计通过 542 题、未通过 100 题，有效评分覆盖全部题目。累计通过占比为 **84.42%**，包含历史重试与补丁重评，不能作为单次通过率。评测配置、各仓库成绩和统计口径见[完整评测报告](docs/SWE-bench-Pro-V2-最终报告-2026-10-26.md)。
+`evaluation/` 与主线分离，通过命令行和 JSON 产物衔接；工作流均由 GitHub 网页端手动触发，推送代码不会自动开始评测。
+
+- **SWE-bench Pro V2 小规模判分校准**：填写官方 `v2/tasks/` 下的单题目录名 `instance_id`，分别验证空补丁失败、参考补丁通过。不需要模型密钥，产物名为 `swebench-calibration`。
+- **SWE-bench Pro V2 全量评测**：每轮固定 642 题，每题解题一次，在新容器中判分。需配置仓库机密 `DEEPSEEK_API_KEY`，最终报告产物名为 `swebench-report`。
+
+校准入口为 `evaluation/calibrate.py`，全量入口为 `evaluation/swebench.py`。两者只共用评测层的 `verifier.py`，校准结果不计入全量成绩。报告包含每题用时、词元消耗、费用、轮数、是否做对以及总成本；统计不完整时不会发布最终通过率或完整总费用。
+
+本地 `archive/`、`.env`、虚拟环境和编辑器配置均不纳入版本控制。

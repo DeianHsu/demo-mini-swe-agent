@@ -1,0 +1,153 @@
+name: SWE-bench Pro V2 全量评测
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      revision: ${{ steps.protocol.outputs.revision }}
+      batch_1: ${{ steps.plan.outputs.batch_1 }}
+      batch_2: ${{ steps.plan.outputs.batch_2 }}
+      batch_3: ${{ steps.plan.outputs.batch_3 }}
+    steps:
+      - name: 每轮只接受首次执行
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            echo "请使用 Run workflow 新建一轮评测，不重跑或替换本轮失败轨迹。" >&2
+            exit 1
+          fi
+          test -n "$DEEPSEEK_API_KEY"
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 检查独立评测层
+        run: python3 -B -m unittest discover -s evaluation -p 'test_*.py' -v
+
+      - name: 读取固定的数据版本
+        id: protocol
+        run: python3 evaluation/swebench.py revision >> "$GITHUB_OUTPUT"
+
+      - name: 获取官方 V2 题目
+        uses: actions/checkout@v7
+        with:
+          repository: scaleapi/SWE-bench_Pro-os
+          ref: ${{ steps.protocol.outputs.revision }}
+          path: archive/swebench-dataset
+          sparse-checkout: v2/tasks
+          persist-credentials: false
+
+      - name: 固定本轮 642 题清单
+        id: plan
+        run: |
+          python3 evaluation/swebench.py plan \
+            --dataset archive/swebench-dataset \
+            --output archive/swebench-run/manifest.json \
+            --run-id "$GITHUB_RUN_ID" \
+            --code-revision "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: swebench-manifest
+          path: archive/swebench-run/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # 每个矩阵 214 题；批次顺序执行，使总并发保持为 8。
+  batch_1:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.batch_1) }}
+    uses: ./.github/workflows/evaluate-case.yml
+    with:
+      index: ${{ matrix.index }}
+      dataset_revision: ${{ needs.plan.outputs.revision }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  batch_2:
+    needs: [plan, batch_1]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.batch_2) }}
+    uses: ./.github/workflows/evaluate-case.yml
+    with:
+      index: ${{ matrix.index }}
+      dataset_revision: ${{ needs.plan.outputs.revision }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  batch_3:
+    needs: [plan, batch_2]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.batch_3) }}
+    uses: ./.github/workflows/evaluate-case.yml
+    with:
+      index: ${{ matrix.index }}
+      dataset_revision: ${{ needs.plan.outputs.revision }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  report:
+    needs: [plan, batch_1, batch_2, batch_3]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: swebench-manifest
+          path: archive/swebench-run
+
+      - name: 收集全部单题产物
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swebench-case-*
+          merge-multiple: true
+          path: archive/swebench-run
+
+      - name: 汇总全量报告
+        if: ${{ always() }}
+        run: |
+          python3 evaluation/report.py archive/swebench-run \
+            --manifest archive/swebench-run/manifest.json
+
+      - name: 显示评测摘要
+        if: ${{ always() }}
+        run: |
+          if [ -f archive/swebench-run/report.md ]; then
+            cat archive/swebench-run/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 保存最终报告
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: swebench-report
+          path: |
+            archive/swebench-run/manifest.json
+            archive/swebench-run/report.json
+            archive/swebench-run/report.csv
+            archive/swebench-run/report.md
+          if-no-files-found: error
+          retention-days: 30

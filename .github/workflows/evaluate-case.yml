@@ -1,0 +1,101 @@
+name: SWE-bench 单题执行
+
+on:
+  workflow_call:
+    inputs:
+      index:
+        required: true
+        type: number
+      dataset_revision:
+        required: true
+        type: string
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    # 不允许 Re-run failed jobs 重新生成解题轨迹。
+    if: ${{ github.run_attempt == '1' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: swebench-manifest
+          path: archive/swebench-run
+
+      - name: 从本轮清单定位题目
+        id: task
+        env:
+          CASE_INDEX: ${{ inputs.index }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          from pathlib import Path
+          manifest = json.loads(Path("archive/swebench-run/manifest.json").read_text())
+          instance_id = manifest["instances"][int(os.environ["CASE_INDEX"])]
+          print(f"path=v2/tasks/{instance_id}")
+          PY
+
+      - name: 获取本题官方文件
+        uses: actions/checkout@v7
+        with:
+          repository: scaleapi/SWE-bench_Pro-os
+          ref: ${{ inputs.dataset_revision }}
+          path: archive/swebench-dataset
+          sparse-checkout: ${{ steps.task.outputs.path }}
+          persist-credentials: false
+
+      - name: 为镜像和独立工作卷释放空间
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+          enable-cache: false
+
+      - name: 安装主线依赖
+        run: uv sync --locked
+
+      - name: 单次解题并在新容器中判分
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ vars.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
+          DEEPSEEK_MODEL: deepseek-flash
+          CASE_INDEX: ${{ inputs.index }}
+        run: |
+          test -n "$DEEPSEEK_API_KEY"
+          uv run --no-sync python -B evaluation/swebench.py run \
+            --dataset archive/swebench-dataset \
+            --manifest archive/swebench-run/manifest.json \
+            --index "$CASE_INDEX" \
+            --output archive/swebench-run
+
+      - name: 修正评测产物所有者
+        if: ${{ always() }}
+        run: |
+          if [ -d archive/swebench-run ]; then
+            sudo chown -R "$(id -u):$(id -g)" archive/swebench-run
+          fi
+
+      - name: 保存本题轨迹、补丁、判分和消耗
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: swebench-case-${{ inputs.index }}
+          # 保留题目子目录，以便汇总时合并全部单题产物。
+          path: |
+            archive/swebench-run/
+            !archive/swebench-run/manifest.json
+          if-no-files-found: warn
+          retention-days: 30

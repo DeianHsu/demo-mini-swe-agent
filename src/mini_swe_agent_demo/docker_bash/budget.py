@@ -1,0 +1,174 @@
+# 用父进程监管解题子进程的整体时限，并保存可供独立评测流程读取的运行结果。
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from mini_swe_agent_demo.docker_bash.cost import read_usage
+
+# 整体解题时限为 50 分钟，使用秒作为进程等待的计时单位。
+TASK_SECONDS = 3000
+
+
+# 保存父子进程交换的 JSON 数据，避免目标文件出现只写入了一部分的内容。
+def write_json(path: Path, data: dict) -> None:
+    # 先把完整数据写到目标文件同目录下的临时文件。
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    # 写入成功后再替换目标文件，使读取方看到完整的一份结果。
+    temporary.replace(path)
+
+
+# 在工作子进程中读取运行参数、执行智能体，并保存智能体的结束摘要。
+def run_worker(output: Path) -> None:
+    # 只有实际解题的子进程才加载模型依赖，父进程可以独立处理时限与统计。
+    from mini_swe_agent_demo.docker_bash.mini_agent import agent
+
+    # 从本次运行的参数文件还原任务、容器和预算，保证执行值与记录值一致。
+    case = json.loads(
+        (output / "case.json").read_text(encoding="utf-8")
+    )
+    result = agent(
+        case["task"],
+        container_name=case["container"],
+        workdir=case["workdir"],
+        timeout=case["command_timeout"],
+        max_steps=case["max_steps"],
+        cost_limit=float(case["cost_limit_usd"]),
+        trajectory_path=output / "trajectory.jsonl",
+    )
+    # 对话已经逐条保存在轨迹中，结果文件只保留摘要，避免重复写入大段历史。
+    result.pop("history")
+    write_json(output / "agent_result.json", result)
+
+
+# 启动并监管一次独立解题过程，结束后停止本题容器并汇总运行统计。
+# 正常结束、超时和工作进程失败均使用同一份轨迹恢复已知用量。
+def run_case(task: str, container: str, workdir: str, output: Path) -> dict:
+    # 每次使用独立目录，禁止覆盖已经开始过的尝试。
+    output.mkdir(parents=True, exist_ok=False)
+    # 固定本次任务的输入和预算，供工作进程读取并留作后续检查。
+    write_json(output / "case.json", {
+        "task": task,
+        "container": container,
+        "workdir": workdir,
+        "max_steps": 250,
+        "command_timeout": 60,
+        "cost_limit_usd": "3",
+        "task_timeout_seconds": TASK_SECONDS,
+    })
+
+    # 初始化结束状态，并用单调时钟计时，避免系统时间调整影响时限。
+    timed_out = False
+    cleanup_error = None
+    started = time.monotonic()
+
+    # 将智能体放入独立 Python 进程，并把标准输出和标准错误合并保存到日志。
+    with (output / "agent.log").open("wb") as log:
+        process = subprocess.Popen(
+            [
+                sys.executable, "-B", "-u", "-m",
+                "mini_swe_agent_demo.docker_bash.budget",
+                "--worker", str(output),
+            ],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+
+        # 扣除进程创建耗时后再等待，保证启动开销也计入整体解题时限。
+        try:
+            remaining = max(
+                0, TASK_SECONDS - (time.monotonic() - started)
+            )
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            # 标记整体超时，工作进程的结束与回收统一由下面的清理阶段处理。
+            timed_out = True
+        finally:
+            # 工作进程仍在运行时强制结束并等待回收，阻止其继续请求模型。
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
+            # 解题耗时不包含随后停止容器的时间。
+            seconds = round(time.monotonic() - started, 3)
+
+            # 停止本题专用容器中的剩余命令，保留容器文件供后续读取。
+            try:
+                subprocess.run(
+                    ["docker", "stop", "--time", "0", container],
+                    capture_output=True,
+                    check=True,
+                    timeout=120,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                # 暂存清理错误，先完成统计落盘，再向调用方报告失败。
+                cleanup_error = f"{type(error).__name__}: {error}"
+
+    # 区分整体超时、工作进程异常和正常退出；正常退出时沿用智能体保存的结束原因。
+    result_path = output / "agent_result.json"
+    if timed_out:
+        result = {"exit_reason": "time_limit"}
+    elif process.returncode != 0:
+        result = {"exit_reason": "error"}
+    else:
+        result = json.loads(
+            result_path.read_text(encoding="utf-8")
+        )
+
+    # 从轨迹恢复已知消耗，避免超时或异常覆盖此前已经产生的费用和轮数。
+    # 最后补充解题耗时及容器清理状态，写出供调用方读取的结果。
+    result.update(read_usage(output / "trajectory.jsonl"))
+    result["seconds"] = seconds
+    result["cleanup_error"] = cleanup_error
+    write_json(result_path, result)
+
+    # 清理成功时返回统计，清理失败则在结果已经保存后抛出异常。
+    if cleanup_error is not None:
+        raise RuntimeError(f"本题统计已保存，但容器停止失败：{cleanup_error}")
+    return result
+
+
+# 解析命令行参数，选择内部工作进程模式或对外提供的预算监管入口。
+def main() -> None:
+    # 定义普通调用所需参数；隐藏的 --worker 参数只用于父进程启动子进程。
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--task-file", type=Path)
+    parser.add_argument("--container")
+    parser.add_argument("--workdir", default="/app")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+
+    # 内部工作进程直接读取已有目录开始解题，避免再次启动一层监管进程。
+    if args.worker is not None:
+        run_worker(args.worker)
+        return
+
+    # 普通调用必须提供任务文件、已有容器和输出目录，缺失时由参数解析器报错。
+    if args.task_file is None or args.container is None or args.output is None:
+        parser.error("必须提供 --task-file、--container 和 --output")
+
+    # 读取任务文本，并使用绝对输出路径启动带预算的完整运行流程。
+    result = run_case(
+        args.task_file.read_text(encoding="utf-8"),
+        args.container,
+        args.workdir,
+        args.output.resolve(),
+    )
+    # 将统计打印为 JSON，便于终端查看或由外部调度程序接收。
+    print(json.dumps(result, ensure_ascii=False))
+
+    # 工作进程失败时返回非零退出码；预算用尽等结束原因由结果字段说明。
+    if result["exit_reason"] == "error":
+        raise SystemExit(1)
+
+
+# 从命令行直接运行本模块时启用参数解析和预算入口。
+if __name__ == "__main__":
+    main()
