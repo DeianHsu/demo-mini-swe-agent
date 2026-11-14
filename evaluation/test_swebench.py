@@ -292,9 +292,9 @@ class EvaluationTests(unittest.TestCase):
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
-                    self.assertFalse((node.module or "").startswith("mini_swe_agent_demo"))
+                    self.assertNotEqual((node.module or "").split(".")[0], "swe")
                 elif isinstance(node, ast.Import):
-                    self.assertFalse(any(alias.name.startswith("mini_swe_agent_demo") for alias in node.names))
+                    self.assertFalse(any(alias.name.split(".")[0] == "swe" for alias in node.names))
 
 
 if __name__ == "__main__":

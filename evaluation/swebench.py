@@ -71,7 +71,7 @@ def run_agent(task_file: Path, container: str, workdir: str, output: Path,
     # 独立进程组用于在主线监管进程异常卡住时一并终止其子进程。
     with log_path.open("wb") as log:
         process = subprocess.Popen(
-            [sys.executable, "-B", "-u", "-m", "mini_swe_agent_demo.docker_bash.budget",
+            [sys.executable, "-B", "-u", "-m", "swe.budget",
              "--task-file", str(task_file), "--container", container,
              "--workdir", workdir, "--output", str(output)],
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,

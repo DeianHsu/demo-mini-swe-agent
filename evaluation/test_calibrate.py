@@ -182,7 +182,7 @@ class CalibrationTests(unittest.TestCase):
                     imports.extend(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom):
                     imports.append(node.module or "")
-            self.assertFalse(any(name.startswith(("swebench", "mini_swe_agent_demo")) for name in imports))
+            self.assertFalse(any(name.split(".")[0] in ("swebench", "swe") for name in imports))
 
 
 if __name__ == "__main__":

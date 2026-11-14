@@ -15,9 +15,8 @@
 ## 项目结构
 
 ```text
-src/mini_swe_agent_demo/
-├── __init__.py
-└── docker_bash/
+src/
+└── swe/
     ├── __init__.py
     ├── mini_agent.py        # 消息历史、工具调度与智能体循环
     ├── environment.py       # Docker Bash 命令执行与输出截断
@@ -62,10 +61,10 @@ docker exec -w /workspace mini-swe-learning bash -c 'echo Hello Agent! > hello.t
 容器运行后启动智能体：
 
 ```powershell
-uv run python -m mini_swe_agent_demo.docker_bash.mini_agent
+uv run python -m swe.mini_agent
 ```
 
-默认任务列出工作目录并读取 `hello.txt`。任务位于 `docker_bash/mini_agent.py` 的 `if __name__ == "__main__":` 中；演示通过 `budget.run_case()` 执行，预算在 `budget.py` 中设置。轨迹与统计写入本地 `archive/demo/`，结束后停止本题容器。
+默认任务列出工作目录并读取 `hello.txt`。任务位于 `src/swe/mini_agent.py` 的 `if __name__ == "__main__":` 中；演示通过 `budget.run_case()` 执行，预算在 `src/swe/budget.py` 中设置。轨迹与统计写入本地 `archive/demo/`，结束后停止本题容器。
 
 已有容器停止后可通过 `docker start mini-swe-learning` 再次启动。
 

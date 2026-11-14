@@ -4,9 +4,9 @@ from decimal import Decimal
 from pathlib import Path
 from textwrap import dedent
 
-from mini_swe_agent_demo.docker_bash.use_llm import use_llm_with_tools
-from mini_swe_agent_demo.docker_bash.environment import execute, limit_observation
-from mini_swe_agent_demo.docker_bash.cost import (
+from swe.use_llm import use_llm_with_tools
+from swe.environment import execute, limit_observation
+from swe.cost import (
     TOKEN_PRICES,
     calculate_cost,
 )
@@ -209,7 +209,7 @@ if __name__ == "__main__":
     # 演示所需的监管入口仅在直接运行时加载，导入智能体函数时不加载它。
     from uuid import uuid4
 
-    from mini_swe_agent_demo.docker_bash.budget import run_case
+    from swe.budget import run_case
 
     # 演示任务用于检查工作目录与文件读取是否可用。
     task = dedent(r"""

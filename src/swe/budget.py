@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 
-from mini_swe_agent_demo.docker_bash.cost import read_usage
+from swe.cost import read_usage
 
 # 整体解题时限为 50 分钟，使用秒作为进程等待的计时单位。
 TASK_SECONDS = 3000
@@ -27,7 +27,7 @@ def write_json(path: Path, data: dict) -> None:
 # 在工作子进程中读取运行参数、执行智能体，并保存智能体的结束摘要。
 def run_worker(output: Path) -> None:
     # 只有实际解题的子进程才加载模型依赖，父进程可以独立处理时限与统计。
-    from mini_swe_agent_demo.docker_bash.mini_agent import agent
+    from swe.mini_agent import agent
 
     # 从本次运行的参数文件还原任务、容器和预算，保证执行值与记录值一致。
     case = json.loads(
@@ -73,7 +73,7 @@ def run_case(task: str, container: str, workdir: str, output: Path) -> dict:
         process = subprocess.Popen(
             [
                 sys.executable, "-B", "-u", "-m",
-                "mini_swe_agent_demo.docker_bash.budget",
+                "swe.budget",
                 "--worker", str(output),
             ],
             stdout=log,

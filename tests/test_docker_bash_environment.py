@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from mini_swe_agent_demo.docker_bash import environment
+from swe import environment
 
 
 class DockerEnvironmentTests(unittest.TestCase):
