@@ -60,7 +60,13 @@
 
 [报告任务](https://github.com/DeianHsu/demo-mini-swe-agent/actions/runs/43650570228/job/132779752980)因用量记录缺失返回退出码 1，GitHub 显示红叉；报告产物已上传。
 
-## 六、数据来源
+## 六、结论
+
+本轮评测验证了智能体方案的可行性和当前配置下的解题能力，结果作为项目基线。
+
+最高思考模式全量评测暂缓。后续维护以相关回归测试为主，思考模式对比先通过固定小样本评估收益和成本。
+
+## 七、数据来源
 
 - [GitHub 运行 43650570228](https://github.com/DeianHsu/demo-mini-swe-agent/actions/runs/43650570228)：工作流时间记录；报告产物 `swebench-report`，单题产物 `swebench-case-题号`。
 - [report.csv](https://github.com/DeianHsu/demo-mini-swe-agent/blob/master/reports/43650570228/report.csv)：逐题用时、词元、费用、轮数和判分。
