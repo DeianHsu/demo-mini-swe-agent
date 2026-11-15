@@ -86,8 +86,12 @@ uv run python -m unittest discover -s evaluation -v
 - **SWE-bench Pro V2 全量评测**：每轮固定 642 题，每题解题一次，在新容器中判分。需配置仓库机密 `DEEPSEEK_API_KEY`，最终报告产物名为 `swebench-report`。
 - **SWE-bench Pro V2 全量评测（最高思考）**：独立手动入口 `evaluate_all_max.yml`，固定启用 `thinking.type=enabled` 和 `reasoning_effort=max`，使用相同密钥、模型、题目、预算及 120 秒客户端超时。最终报告产物名为 `swebench-report-max`。
 
-校准入口为 `evaluation/calibrate.py`，全量入口为 `evaluation/swebench.py`。两者只共用评测层的 `verifier.py`，校准结果不计入全量成绩。报告包含思考模式、每题用时、词元消耗、费用、轮数、是否做对以及总成本；统计不完整时不会发布最终通过率或完整总费用。
+校准入口为 `evaluation/calibrate.py`，全量入口为 `evaluation/swebench.py`。两者只共用评测层的 `verifier.py`，校准结果不计入全量成绩。报告包含思考模式、每题用时、词元消耗、费用、轮数、是否做对以及总成本；判分完整时发布通过率，用量完整时发布完整总费用。
 
 最高思考入口复用全量调度，每轮单独生成清单和产物；普通全量入口始终默认关闭思考。带工具调用的思考回复会完整保留并回传 `reasoning_content`，费用仍按服务端 `usage` 中的总输出词元计算，不重复加算思考词元。
 
 本地 `archive/`、`.env`、虚拟环境和编辑器配置均不纳入版本控制。
+
+## 评测报告
+
+- [2026-11-15：关闭思考模式的全量评测报告](https://github.com/DeianHsu/demo-mini-swe-agent/blob/master/reports/43650570228/report.md)
